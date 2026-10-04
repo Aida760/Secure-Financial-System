@@ -1,0 +1,120 @@
+
+SET SERVEROUTPUT ON SIZE UNLIMITED;
+
+
+BEGIN
+    FOR r IN (SELECT trigger_name FROM user_triggers 
+              WHERE trigger_name IN ('TRG_ACCOUNT_SECURE_UPDATE', 'TRG_BUSINESS_HOURS_ONLY', 
+                                    'TRG_SENSITIVE_UPDATE', 'TRG_SUSPICIOUS_ACTIVITY', 
+                                    'TRG_TIME_ACCESS_CONTROL', 'TRG_WORKING_HOURS', 
+                                    'TRG_WORK_HOURS_ONLY', 'TRG_AUTO_ENCRYPT', 
+                                    'TRG_SENSITIVE_ACCOUNTS', 'TRG_TIME_ENFORCEMENT',
+                                    'TRG_AUDIT_FINAL_PROTECT', 'TRG_SECURE_MIGRATION_VALIDATE',
+                                    'TRG_AUDIT_IMMUTABLE', 'TRG_AUDIT_PROTECT', 'TRG_TIME_LOCK')) 
+    LOOP
+        EXECUTE IMMEDIATE 'DROP TRIGGER ' || r.trigger_name;
+    END LOOP;
+END;
+/
+
+
+BEGIN EXECUTE IMMEDIATE 'ALTER TABLE ACCOUNTS ADD (balance NUMBER)'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'ALTER TABLE ACCOUNTS ADD (balance_enc RAW(2000))'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'ALTER TABLE CUSTOMERS ADD (credit_score NUMBER)'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'ALTER TABLE CUSTOMERS ADD (credit_score_enc RAW(2000))'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+
+
+CREATE OR REPLACE PACKAGE SECURITY_PKG AS
+    FUNCTION encrypt_num(p_num IN NUMBER) RETURN RAW;
+    FUNCTION decrypt_num(p_enc IN RAW) RETURN NUMBER;
+    PROCEDURE log_action(p_type IN VARCHAR2, p_table IN VARCHAR2, p_msg IN VARCHAR2);
+    PROCEDURE monitor_suspicious_activity(p_cust_id IN NUMBER);
+    FUNCTION is_valid_increase(p_old NUMBER, p_new NUMBER) RETURN BOOLEAN;
+END SECURITY_PKG;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY SECURITY_PKG AS
+    v_key RAW(32) := UTL_RAW.CAST_TO_RAW('BankSecureKey2026_Phase3_Safe_!!');
+
+    FUNCTION encrypt_num(p_num IN NUMBER) RETURN RAW IS 
+    BEGIN 
+        IF p_num IS NULL THEN RETURN NULL; END IF;
+        RETURN DBMS_CRYPTO.ENCRYPT(
+            src => UTL_RAW.CAST_TO_RAW(TO_CHAR(p_num)),
+            typ => DBMS_CRYPTO.ENCRYPT_AES256 + DBMS_CRYPTO.CHAIN_CBC + DBMS_CRYPTO.PAD_PKCS5,
+            key => v_key);
+    END;
+
+    FUNCTION decrypt_num(p_enc IN RAW) RETURN NUMBER IS 
+    BEGIN 
+        IF p_enc IS NULL THEN RETURN NULL; END IF;
+        RETURN TO_NUMBER(UTL_RAW.CAST_TO_VARCHAR2(DBMS_CRYPTO.DECRYPT(
+            src => p_enc,
+            typ => DBMS_CRYPTO.ENCRYPT_AES256 + DBMS_CRYPTO.CHAIN_CBC + DBMS_CRYPTO.PAD_PKCS5,
+            key => v_key)));
+    END;
+
+    PROCEDURE log_action(p_type IN VARCHAR2, p_table IN VARCHAR2, p_msg IN VARCHAR2) IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+    BEGIN
+        INSERT INTO AUDIT_LOGS (log_id, event_time, db_user, action_type, table_affected, action_details)
+        VALUES (audit_log_seq.NEXTVAL, SYSTIMESTAMP, USER, p_type, p_table, p_msg);
+        COMMIT;
+    END;
+
+    FUNCTION is_valid_increase(p_old NUMBER, p_new NUMBER) RETURN BOOLEAN IS
+    BEGIN
+        IF p_old IS NOT NULL AND p_new > p_old * 1.5 THEN RETURN FALSE; END IF;
+        RETURN TRUE;
+    END;
+
+    PROCEDURE monitor_suspicious_activity(p_cust_id IN NUMBER) IS
+        CURSOR c_logs IS SELECT action_type FROM AUDIT_LOGS WHERE action_details LIKE '%'||p_cust_id||'%';
+    BEGIN
+        FOR r IN c_logs LOOP NULL; END LOOP;
+    END;
+END SECURITY_PKG;
+/
+
+
+CREATE OR REPLACE TRIGGER TRG_AUDIT_FINAL_IMMUTABLE
+BEFORE UPDATE OR DELETE ON AUDIT_LOGS
+BEGIN
+    RAISE_APPLICATION_ERROR(-20001, 'SECURITY ALERT: Audit logs cannot be modified.');
+END;
+/
+
+CREATE OR REPLACE TRIGGER TRG_TIME_LOCK
+BEFORE INSERT OR UPDATE OR DELETE ON ACCOUNTS
+BEGIN
+    IF TO_CHAR(SYSDATE, 'HH24') NOT BETWEEN '08' AND '18' THEN
+        RAISE_APPLICATION_ERROR(-20002, 'MAINTENANCE: Database is read-only after 18:00.');
+    END IF;
+END;
+/
+
+
+BEGIN
+    UPDATE ACCOUNTS SET balance_enc = SECURITY_PKG.encrypt_num(balance);
+    UPDATE CUSTOMERS SET credit_score_enc = SECURITY_PKG.encrypt_num(credit_score);
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('>>> DATA ENCRYPTION COMPLETE');
+END;
+/
+
+ALTER TRIGGER TRG_TIME_LOCK ENABLE;
+
+BEGIN
+    EXECUTE IMMEDIATE 'ALTER TABLE ACCOUNTS DROP COLUMN balance';
+    EXECUTE IMMEDIATE 'ALTER TABLE CUSTOMERS DROP COLUMN credit_score';
+END;
+/
+
+
+AUDIT SELECT, INSERT, UPDATE, DELETE ON CUSTOMERS BY ACCESS;
+AUDIT SELECT, INSERT, UPDATE, DELETE ON ACCOUNTS BY ACCESS;

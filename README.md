@@ -9,6 +9,10 @@ Autonomous Audit Logging:Captures critical security events and updates independe
 Immutable Audit Protection: Enforces non-repudiation using PL/SQL triggers (`TRG_AUDIT_FINAL_IMMUTABLE`) that block modifications or deletions on AUDIT_LOGS.
 
 
+Note on Script Execution:
+ When executing PL/SQL verification blocks in interactive tools (such as Oracle Live SQL, SQL Developer, or SQL*Plus), run `SET DEFINE OFF;` prior to execution. This prevents Oracle from treating ampersands (&) as substitution variable prompts.
+
+
 
 
 
